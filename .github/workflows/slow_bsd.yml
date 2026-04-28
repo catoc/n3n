@@ -3,12 +3,6 @@ name: Slow BSD test job
 
 # yamllint disable-line rule:truthy
 on:
-  pull_request:
-  release:
-    types:
-      - published
-      - created
-      - edited
   workflow_dispatch:
 
 jobs:

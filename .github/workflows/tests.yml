@@ -3,12 +3,6 @@ name: Testing
 
 # yamllint disable-line rule:truthy
 on:
-  pull_request:
-  release:
-    types:
-      - published
-      - created
-      - edited
   workflow_dispatch:
 
 jobs:
@@ -344,7 +338,6 @@ jobs:
   package_ipk:
     name: Package for OpenWrt
     runs-on: ubuntu-latest
-    if: github.event_name != 'pull_request'
 
     strategy:
       fail-fast: true
