@@ -3,10 +3,6 @@ name: Slow full Openwrt Build
 
 # yamllint disable-line rule:truthy
 on:
-  push:
-    branches:
-      - openwrt
-
   workflow_dispatch:
 
 jobs:

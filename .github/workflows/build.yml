@@ -1,0 +1,406 @@
+---
+name: Build n3n
+
+on:
+  workflow_dispatch:
+    inputs:
+      repo_ref:
+        description: Branch/tag to compile
+        required: true
+        default: "dev"
+      rel:
+        description: Release type
+        required: true
+        default: none
+        type: choice
+        options:
+          - none
+          - release
+      tag:
+        description: Release version tag
+        required: false
+        default: ""
+      upx:
+        description: Enable UPX compression
+        required: true
+        default: false
+        type: boolean
+      enable_zstd:
+        description: Enable ZSTD compression
+        default: true
+        type: boolean
+
+concurrency:
+  group: n3n-build-${{ inputs.repo_ref }}
+  cancel-in-progress: true
+
+env:
+  TZ: Asia/Shanghai
+
+permissions:
+  contents: write
+
+jobs:
+  build-linux-musl:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: aarch64-linux
+            musl: aarch64-linux-musl
+          - target: x86_64-linux
+            musl: x86_64-linux-musl
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Cache musl cross-compiler
+        uses: actions/cache@v4
+        with:
+          path: ~/musl-cross
+          key: musl-${{ matrix.musl }}-v0.0.1
+
+      - name: Download musl cross-compiler
+        if: steps.cache-musl.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/musl-cross
+          URL="https://github.com/musl-cc/musl.cc/releases"
+          URL="$URL/download/v0.0.1/${{ matrix.musl }}-cross.tgz"
+          curl -fL --retry 3 -o ~/musl-cross/toolchain.tgz "$URL"
+          cd ~/musl-cross
+          tar xf toolchain.tgz
+          rm toolchain.tgz
+
+      - name: Setup environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake \
+            libtool pkg-config
+
+          echo "PATH=$HOME/musl-cross/${{ matrix.musl }}-cross/bin:$PATH" \
+            >> $GITHUB_ENV
+          echo "CC=${{ matrix.musl }}-gcc" >> $GITHUB_ENV
+          echo "CXX=${{ matrix.musl }}-g++" >> $GITHUB_ENV
+          echo "AR=${{ matrix.musl }}-ar" >> $GITHUB_ENV
+          echo "RANLIB=${{ matrix.musl }}-ranlib" >> $GITHUB_ENV
+          echo "STRIP=${{ matrix.musl }}-strip" >> $GITHUB_ENV
+          echo "LDFLAGS=-static" >> $GITHUB_ENV
+
+      - name: Cache ZSTD
+        if: inputs.enable_zstd
+        uses: actions/cache@v4
+        with:
+          path: ~/deps/zstd
+          key: zstd-${{ matrix.target }}-1.5.5
+
+      - name: Build ZSTD (static)
+        if: inputs.enable_zstd && steps.cache-zstd.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/deps/zstd
+          curl -fL --retry 3 -o zstd.tar.gz \
+            https://github.com/facebook/zstd/releases/download/v1.5.5/zstd-1.5.5.tar.gz
+          tar xf zstd.tar.gz
+          cd zstd-1.5.5/lib
+          make -j$(nproc) lib \
+            CC=${{ matrix.musl }}-gcc AR=${{ matrix.musl }}-ar
+          PREFIX=$HOME/deps/zstd make install install-static
+
+      - name: Build n3n
+        run: |
+          ./autogen.sh
+          CONFIG_OPTS="--host=${{ matrix.musl }} --enable-pthread"
+          export LDFLAGS="-static"
+          if [ "${{ inputs.enable_zstd }}" = "true" ]; then
+            export CPPFLAGS="-I$HOME/deps/zstd/include"
+            export LDFLAGS="-static -L$HOME/deps/zstd/lib"
+            CONFIG_OPTS="$CONFIG_OPTS --with-zstd=$HOME/deps/zstd"
+          fi
+          ./configure $CONFIG_OPTS
+          make -j$(nproc) all
+
+          file apps/n3n-edge
+          file apps/n3n-supernode
+
+      - name: Strip binaries
+        run: |
+          ${{ matrix.musl }}-strip apps/n3n-edge apps/n3n-supernode
+
+      - name: UPX compression
+        if: inputs.upx
+        uses: crazy-max/ghaction-upx@v4
+        with:
+          files: |
+            apps/n3n-edge
+            apps/n3n-supernode
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}-binaries
+          path: |
+            apps/n3n-edge
+            apps/n3n-supernode
+
+      - name: Package
+        run: |
+          mkdir -p dist/${{ matrix.target }}
+          cp apps/n3n-edge apps/n3n-supernode dist/${{ matrix.target }}/
+          cp doc/edge.conf.sample doc/supernode.conf.sample \
+            doc/community.list.sample dist/${{ matrix.target }}/ || true
+          cp scripts/n3nctl dist/${{ matrix.target }}/ || true
+          cd dist/${{ matrix.target }}
+          tar czf ../n3n-${{ matrix.target }}.tar.gz *
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}-package
+          path: dist/n3n-${{ matrix.target }}.tar.gz
+
+  build-mt7621:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Cache OpenWrt SDK
+        uses: actions/cache@v4
+        with:
+          path: ~/openwrt-sdk
+          key: openwrt-sdk-mt7621-23.05.5
+
+      - name: Download OpenWrt SDK
+        if: steps.cache-sdk.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/openwrt-sdk
+          cd ~/openwrt-sdk
+          URL="https://downloads.openwrt.org/releases/23.05.5"
+          URL="$URL/targets/ramips/mt7621"
+          URL="$URL/openwrt-sdk-23.05.5-ramips-mt7621_gcc-12.3.0_musl.Linux-x86_64.tar.xz"
+          curl -fL --retry 3 -o sdk.tar.xz "$URL"
+          tar xf sdk.tar.xz --strip-components=1
+          rm sdk.tar.xz
+
+      - name: Setup environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake libtool
+
+          SDK_PATH=~/openwrt-sdk
+          STAGING=$SDK_PATH/staging_dir
+          TOOLCHAIN=$STAGING/toolchain-mipsel_24kc_gcc-12.3.0_musl
+
+          # Only add toolchain to PATH (NOT host/bin with broken autotools)
+          echo "PATH=$TOOLCHAIN/bin:$PATH" >> $GITHUB_ENV
+          echo "CC=mipsel-openwrt-linux-musl-gcc" >> $GITHUB_ENV
+          echo "CXX=mipsel-openwrt-linux-musl-g++" >> $GITHUB_ENV
+          echo "AR=mipsel-openwrt-linux-musl-gcc-ar" >> $GITHUB_ENV
+          echo "RANLIB=mipsel-openwrt-linux-musl-gcc-ranlib" >> $GITHUB_ENV
+          echo "STRIP=mipsel-openwrt-linux-musl-strip" >> $GITHUB_ENV
+          echo "STAGING_DIR=$STAGING" >> $GITHUB_ENV
+
+      - name: Cache ZSTD
+        if: inputs.enable_zstd
+        uses: actions/cache@v4
+        with:
+          path: ~/deps/zstd
+          key: zstd-mt7621-1.5.5
+
+      - name: Build ZSTD (static)
+        if: inputs.enable_zstd && steps.cache-zstd.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/deps/zstd
+          curl -fL --retry 3 -o zstd.tar.gz \
+            https://github.com/facebook/zstd/releases/download/v1.5.5/zstd-1.5.5.tar.gz
+          tar xf zstd.tar.gz
+          cd zstd-1.5.5/lib
+          make -j$(nproc) lib \
+            CC=mipsel-openwrt-linux-musl-gcc \
+            AR=mipsel-openwrt-linux-musl-gcc-ar
+          PREFIX=$HOME/deps/zstd make install install-static
+
+      - name: Generate configure (use system autotools)
+        run: |
+          # Use system autoconf/automake, not SDK's broken version
+          ./autogen.sh
+
+      - name: Build n3n (use SDK toolchain)
+        run: |
+          CONFIG_OPTS="--host=mipsel-openwrt-linux-musl --enable-pthread"
+          if [ "${{ inputs.enable_zstd }}" = "true" ]; then
+            export CPPFLAGS="-I$HOME/deps/zstd/include"
+            export LDFLAGS="-L$HOME/deps/zstd/lib"
+            CONFIG_OPTS="$CONFIG_OPTS --with-zstd=$HOME/deps/zstd"
+          fi
+          ./configure $CONFIG_OPTS
+          make -j$(nproc) all
+
+          file apps/n3n-edge
+          file apps/n3n-supernode
+
+      - name: Strip binaries
+        run: |
+          mipsel-openwrt-linux-musl-strip apps/n3n-edge apps/n3n-supernode
+
+      - name: UPX compression
+        if: inputs.upx
+        uses: crazy-max/ghaction-upx@v4
+        with:
+          files: |
+            apps/n3n-edge
+            apps/n3n-supernode
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: mt7621-binaries
+          path: |
+            apps/n3n-edge
+            apps/n3n-supernode
+
+      - name: Package
+        run: |
+          mkdir -p dist/mt7621
+          cp apps/n3n-edge apps/n3n-supernode dist/mt7621/
+          cp doc/edge.conf.sample doc/supernode.conf.sample \
+            doc/community.list.sample dist/mt7621/ || true
+          cp scripts/n3nctl dist/mt7621/ || true
+          cd dist/mt7621
+          tar czf ../n3n-mt7621.tar.gz *
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: mt7621-package
+          path: dist/n3n-mt7621.tar.gz
+
+  build-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+
+      - name: Setup MinGW
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake \
+            libtool mingw-w64
+
+          echo "CC=x86_64-w64-mingw32-gcc" >> $GITHUB_ENV
+          echo "CXX=x86_64-w64-mingw32-g++" >> $GITHUB_ENV
+          echo "AR=x86_64-w64-mingw32-ar" >> $GITHUB_ENV
+          echo "RANLIB=x86_64-w64-mingw32-ranlib" >> $GITHUB_ENV
+          echo "STRIP=x86_64-w64-mingw32-strip" >> $GITHUB_ENV
+          echo "LDFLAGS=-static" >> $GITHUB_ENV
+
+      - name: Cache ZSTD
+        if: inputs.enable_zstd
+        uses: actions/cache@v4
+        with:
+          path: ~/deps/zstd
+          key: zstd-windows-1.5.5
+
+      - name: Build ZSTD (static)
+        if: inputs.enable_zstd && steps.cache-zstd.outputs.cache-hit != 'true'
+        run: |
+          mkdir -p ~/deps/zstd
+          curl -fL --retry 3 -o zstd.tar.gz \
+            https://github.com/facebook/zstd/releases/download/v1.5.5/zstd-1.5.5.tar.gz
+          tar xf zstd.tar.gz
+          cd zstd-1.5.5/lib
+          CC=x86_64-w64-mingw32-gcc AR=x86_64-w64-mingw32-ar \
+            make -j$(nproc) lib
+          PREFIX=$HOME/deps/zstd make install install-static
+
+      - name: Build n3n
+        run: |
+          ./autogen.sh
+          CONFIG_OPTS="--host=x86_64-w64-mingw32"
+          export LDFLAGS="-static"
+          if [ "${{ inputs.enable_zstd }}" = "true" ]; then
+            export CPPFLAGS="-I$HOME/deps/zstd/include"
+            export LDFLAGS="-static -L$HOME/deps/zstd/lib"
+            CONFIG_OPTS="$CONFIG_OPTS --with-zstd=$HOME/deps/zstd"
+          fi
+          ./configure $CONFIG_OPTS
+          make -j$(nproc) all
+
+          file apps/n3n-edge.exe
+          file apps/n3n-supernode.exe
+
+      - name: Strip binaries
+        run: |
+          x86_64-w64-mingw32-strip apps/n3n-edge.exe apps/n3n-supernode.exe
+
+      - name: UPX compression
+        if: inputs.upx
+        uses: crazy-max/ghaction-upx@v4
+        with:
+          files: |
+            apps/n3n-edge.exe
+            apps/n3n-supernode.exe
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64-binaries
+          path: |
+            apps/n3n-edge.exe
+            apps/n3n-supernode.exe
+
+      - name: Package
+        run: |
+          mkdir -p dist/windows-x86_64
+          cp apps/n3n-edge.exe apps/n3n-supernode.exe dist/windows-x86_64/
+          cp doc/edge.conf.sample doc/supernode.conf.sample \
+            doc/community.list.sample dist/windows-x86_64/ || true
+          cp scripts/n3nctl dist/windows-x86_64/ || true
+          cd dist/windows-x86_64
+          zip ../n3n-windows-x86_64.zip *
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-x86_64-package
+          path: dist/n3n-windows-x86_64.zip
+
+  release:
+    needs:
+      - build-linux-musl
+      - build-mt7621
+      - build-windows
+    if: inputs.rel == 'release'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Prepare release
+        run: |
+          mkdir -p release
+          find artifacts -name "*.tar.gz" -exec cp {} release/ \;
+          find artifacts -name "*.zip" -exec cp {} release/ \;
+          if [ -z "${{ inputs.tag }}" ]; then
+            # Use GitHub SHA short hash (first 7 chars)
+            SHORT_SHA="${{ github.sha }}"
+            TAG="v$(date +%Y%m%d)-${SHORT_SHA:0:7}"
+          else
+            TAG="${{ inputs.tag }}"
+          fi
+          echo "TAG=$TAG" >> $GITHUB_ENV
+
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ env.TAG }}
+          name: N3N Build ${{ env.TAG }}
+          files: release/*
+          prerelease: true
