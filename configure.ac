@@ -2,6 +2,9 @@ dnl> Do not add anything above
 AC_INIT([n3n], m4_esyscmd([scripts/version.sh | tr -d '\n']))
 dnl> Do not add anything above
 
+# Help configure find the source directory
+AC_CONFIG_SRCDIR([include/n2n.h])
+
 # Older versions of the autotools expect to find install-sh here.
 AC_CONFIG_AUX_DIR(scripts)
 
