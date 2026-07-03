@@ -232,9 +232,10 @@ jobs:
       - name: Build n3n (use SDK toolchain)
         run: |
           CONFIG_OPTS="--host=mipsel-openwrt-linux-musl --enable-pthread"
+          export LDFLAGS="-static"
           if [ "${{ inputs.enable_zstd }}" = "true" ]; then
             export CPPFLAGS="-I$HOME/deps/zstd/include"
-            export LDFLAGS="-L$HOME/deps/zstd/lib"
+            export LDFLAGS="-static -L$HOME/deps/zstd/lib"
             CONFIG_OPTS="$CONFIG_OPTS --with-zstd=$HOME/deps/zstd"
           fi
           ./configure $CONFIG_OPTS
